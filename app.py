@@ -8,6 +8,7 @@ import secrets
 import math
 import smtplib
 from email.mime.text import MIMEText
+import time
 
 # ==========================================
 # 0. HELPER FUNCTIONS
@@ -21,10 +22,8 @@ def get_ordinal(n):
 # ==========================================
 # 1. DATABASE SETUP (PostgreSQL Optimized)
 # ==========================================
-
 @st.cache_resource
 def get_engine():
-    # Caches the SQLAlchemy engine to prevent creating a new connection pool on every rerun
     return sqlalchemy.create_engine(st.secrets["DB_URL"])
 
 def get_connection():
@@ -60,6 +59,11 @@ def init_db():
                         key TEXT PRIMARY KEY,
                         value TEXT
                     )''')
+        
+        c.execute("ALTER TABLE elections ADD COLUMN IF NOT EXISTS is_blindfolded INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE elections ADD COLUMN IF NOT EXISTS quorum INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE voter_status ADD COLUMN IF NOT EXISTS email_plaintext TEXT")
+        
         conn.commit()
     finally:
         conn.close()
@@ -74,17 +78,19 @@ def generate_receipt():
     return secrets.token_hex(4).upper()
 
 # ==========================================
-# 2. EMAIL 2FA SYSTEM (SMTP)
+# 2. EMAIL SYSTEMS (SMTP)
 # ==========================================
-def send_otp_email(to_address, otp, election_title):
+def get_smtp_config():
     conn = get_connection()
     try:
         c = conn.cursor()
         c.execute("SELECT key, value FROM app_config")
-        config = dict(c.fetchall())
+        return dict(c.fetchall())
     finally:
         conn.close()
-    
+
+def send_smtp_email(to_address, subject, body):
+    config = get_smtp_config()
     if config.get("smtp_enabled") != "True":
         return False, "SMTP is disabled."
         
@@ -94,10 +100,10 @@ def send_otp_email(to_address, otp, election_title):
     password = config.get("smtp_pass", "")
     
     if not user or not password:
-        return False, "SMTP credentials missing. Configure them in the Admin tab."
+        return False, "SMTP credentials missing."
         
-    msg = MIMEText(f"Your secure One-Time Password (OTP) for '{election_title}' is:\n\n{otp}\n\nDo not share this code with anyone.")
-    msg['Subject'] = f"Voting Security Code: {election_title}"
+    msg = MIMEText(body)
+    msg['Subject'] = subject
     msg['From'] = user
     msg['To'] = to_address
     
@@ -106,7 +112,7 @@ def send_otp_email(to_address, otp, election_title):
             server.starttls()
             server.login(user, password)
             server.send_message(msg)
-        return True, "Email sent successfully."
+        return True, "Success"
     except Exception as e:
         return False, str(e)
 
@@ -218,7 +224,9 @@ query_params = st.query_params
 action_param = query_params.get("action", None)
 election_id_param = query_params.get("election_id", None)
 
-def get_base_url(): return "?election_id={}&action={}"
+host_url = st.secrets.get("HOST_URL", "https://your-app-url.streamlit.app")
+def get_base_url(): 
+    return host_url + "?election_id={}&action={}"
 
 # --- DIRECT SHAREABLE LINKS ---
 if action_param in ["vote", "results"] and election_id_param:
@@ -237,11 +245,7 @@ if action_param in ["vote", "results"] and election_id_param:
         questions_data = json.loads(election['questions_json'])
         
         deadline_val = election['deadline']
-        if isinstance(deadline_val, str):
-            deadline_dt = datetime.datetime.strptime(deadline_val, "%Y-%m-%d %H:%M:%S")
-        else:
-            deadline_dt = deadline_val
-            
+        deadline_dt = datetime.datetime.strptime(deadline_val, "%Y-%m-%d %H:%M:%S") if isinstance(deadline_val, str) else deadline_val
         is_active = datetime.datetime.now() < deadline_dt
 
         if action_param == "vote":
@@ -273,11 +277,19 @@ if action_param in ["vote", "results"] and election_id_param:
                         can_proceed = True
                         
                 if can_proceed:
-                    if 'otp_verified' not in st.session_state: st.session_state['otp_verified'] = False
+                    is_email = "@" in voter_id
+                    
+                    if 'otp_verified' not in st.session_state: 
+                        st.session_state['otp_verified'] = False
+                        
+                    # BYPASS OTP IF USING A VOTER ID
+                    if not is_email:
+                        st.session_state['otp_verified'] = True
                         
                     if not st.session_state['otp_verified']:
                         if st.button("Send Security Code (OTP)"):
                             new_otp = generate_otp()
+                            
                             c.execute("SELECT 1 FROM voter_status WHERE election_id=%s AND voter_hash=%s", (election['id'], voter_hash))
                             if c.fetchone():
                                 c.execute("UPDATE voter_status SET otp=%s WHERE election_id=%s AND voter_hash=%s", (new_otp, election['id'], voter_hash))
@@ -285,15 +297,13 @@ if action_param in ["vote", "results"] and election_id_param:
                                 c.execute("INSERT INTO voter_status (election_id, voter_hash, is_allowed, has_voted, otp) VALUES (%s, %s, 1, 0, %s)", (election['id'], voter_hash, new_otp))
                             conn.commit()
                             
-                            if "@" in voter_id:
-                                success, msg = send_otp_email(voter_id, new_otp, election['title'])
-                                if success:
-                                    st.success(f"📧 A code has been emailed to **{voter_id}**.")
-                                else:
-                                    st.warning(f"SMTP not configured or failed ({msg}).")
-                                    st.info(f"**FALLBACK SIMULATION:** Your code is: **{new_otp}**")
+                            body = f"Your secure One-Time Password (OTP) for '{election['title']}' is:\n\n{new_otp}\n\nDo not share this code with anyone."
+                            success, msg = send_smtp_email(voter_id, f"Voting Security Code: {election['title']}", body)
+                            if success:
+                                st.success(f"📧 A code has been emailed to **{voter_id}**.")
                             else:
-                                st.info(f"Using a Voter ID instead of an email. Your code is: **{new_otp}**")
+                                st.warning(f"SMTP not configured or failed ({msg}).")
+                                st.info(f"**FALLBACK SIMULATION:** Your code is: **{new_otp}**")
                         
                         entered_otp = st.text_input("Enter 6-digit OTP Code:")
                         if st.button("Verify OTP"):
@@ -310,7 +320,6 @@ if action_param in ["vote", "results"] and election_id_param:
                         st.info("💡 **Instructions:** Select candidates in order of preference. Rankings are **NOT compulsory**. You may rank as many or as few as you wish. Leave a question entirely blank to abstain.")
                         
                         ballot_dict = {}
-                        
                         for q in questions_data:
                             st.divider()
                             st.markdown(f"### {q['title']}")
@@ -327,7 +336,6 @@ if action_param in ["vote", "results"] and election_id_param:
                             if selection:
                                 st.markdown("**Your Custom Rankings:**")
                                 for i, choice in enumerate(selection):
-                                    # FIX: Now cleanly displays "1st Choice:", "2nd Choice:" etc.
                                     st.markdown(f"**{get_ordinal(i+1)} Choice:** {choice}")
                                 ballot_dict[q['id']] = selection
                         
@@ -348,15 +356,24 @@ if action_param in ["vote", "results"] and election_id_param:
 
         elif action_param == "results":
             st.title(f"📊 Results: {election['title']}")
+            
+            if is_active and election.get('is_blindfolded') == 1:
+                st.warning("🔒 **Strict Neutrality Enabled:** The results of this election are hidden until the deadline passes.")
+                st.stop()
+                
             c.execute("SELECT ballot_json FROM anonymous_votes WHERE election_id=%s", (election['id'],))
-            raw_ballots = [json.loads(v[0]) for v in c.fetchall()]
+            raw_ballots =[json.loads(v[0]) for v in c.fetchall()]
             
             st.metric("Total Overall Ballots Cast", len(raw_ballots))
+            
+            quorum = election.get('quorum', 0)
+            if not is_active and quorum > 0 and len(raw_ballots) < quorum:
+                st.error(f"⚠️ **QUORUM NOT MET!** This election required a minimum of {quorum} votes, but only received {len(raw_ballots)}. These results are provisional or invalid according to your constitution.")
             
             for q in questions_data:
                 st.divider()
                 st.markdown(f"## {q['title']}")
-                q_ballots = [b.get(q['id']) for b in raw_ballots if b.get(q['id']) and len(b.get(q['id'])) > 0]
+                q_ballots =[b.get(q['id']) for b in raw_ballots if b.get(q['id']) and len(b.get(q['id'])) > 0]
                 display_question_results(q, q_ballots)
             
             st.divider()
@@ -379,7 +396,6 @@ if action_param in ["vote", "results"] and election_id_param:
 # --- MAIN ADMIN APP ---
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 
-# FIX: Fetching credentials from st.secrets, with a safe fallback
 admin_user = st.secrets.get("ADMIN_USER", "PubSoc")
 admin_pass = st.secrets.get("ADMIN_PASS", "randomise")
 
@@ -404,14 +420,13 @@ if not st.session_state['logged_in']:
     st.info("Please login via the sidebar to access the platform.")
     st.stop()
 
-# Safe connection pooling setup
 conn = get_connection()
 try:
     c = conn.cursor() 
 
-    elections_df = pd.read_sql_query("SELECT * FROM elections", get_engine())
+    elections_df = pd.read_sql_query("SELECT * FROM elections ORDER BY id DESC", get_engine())
 
-    sub_create, sub_voters, sub_turnout, sub_smtp = st.tabs(["Create Election Event", "Voter Access (Emails/IDs)", "Turnout & Data Export", "SMTP Setup"])
+    sub_create, sub_clone, sub_voters, sub_turnout, sub_smtp = st.tabs(["Create Election Event", "Clone Past Election", "Voter Access (Emails/IDs)", "Turnout & Data Export", "SMTP Setup"])
 
     # 1. CREATE ELECTION
     with sub_create:
@@ -423,6 +438,14 @@ try:
         col1, col2 = st.columns(2)
         with col1: deadline_date = st.date_input("Deadline Date", datetime.date.today() + datetime.timedelta(days=7))
         with col2: deadline_time = st.time_input("Deadline Time", datetime.time(23, 59))
+            
+        st.divider()
+        st.markdown("### Security & Constitutional Rules")
+        col3, col4 = st.columns(2)
+        with col3:
+            is_blind = st.checkbox("🔒 Enable Strict Neutrality (Admin Blindfold)", help="Hides turnout metrics and standing votes from Admins until the election ends.")
+        with col4:
+            q_req = st.number_input("Quorum Requirement", min_value=0, value=0, help="Minimum number of total ballots required for the election to be valid. Leave 0 for no quorum.")
             
         st.divider()
         st.markdown("### Ballot Configuration")
@@ -447,7 +470,6 @@ try:
                     st.error("Event Title is required.")
                 else:
                     deadline_dt = datetime.datetime.combine(deadline_date, deadline_time)
-                    
                     final_questions =[]
                     for q_ref in questions_list:
                         q_title_val = st.session_state[q_ref['title_key']]
@@ -461,18 +483,41 @@ try:
                         if q_ron_val:
                             cand_list.append({"name": "Re-Open Nominations (RON)", "bio": "Restart the search."})
                             
-                        final_questions.append({
-                            "id": q_ref['id'],
-                            "title": q_title_val,
-                            "seats": q_seats_val,
-                            "candidates": cand_list
-                        })
+                        final_questions.append({"id": q_ref['id'], "title": q_title_val, "seats": q_seats_val, "candidates": cand_list})
                     
-                    c.execute('''INSERT INTO elections (title, description, election_type, deadline, questions_json)
-                                 VALUES (%s, %s, %s, %s, %s)''', 
-                              (new_title, new_desc, elec_type, deadline_dt.strftime("%Y-%m-%d %H:%M:%S"), json.dumps(final_questions)))
+                    c.execute('''INSERT INTO elections (title, description, election_type, deadline, questions_json, is_blindfolded, quorum)
+                                 VALUES (%s, %s, %s, %s, %s, %s, %s)''', 
+                              (new_title, new_desc, elec_type, deadline_dt.strftime("%Y-%m-%d %H:%M:%S"), json.dumps(final_questions), int(is_blind), q_req))
                     conn.commit()
                     st.success("Election Event created! Go to 'Voter Access' to authorize voters.")
+
+    # 1.5 CLONE PAST ELECTION
+    with sub_clone:
+        if elections_df.empty:
+            st.info("No elections available to clone.")
+        else:
+            st.markdown("### Clone a Past Election")
+            st.write("Instantly recreate an old ballot with identical positions, descriptions, and candidates, but a new deadline. (Voter access lists are NOT cloned).")
+            
+            clone_choice = st.selectbox("Select Election to Clone:", elections_df['title'])
+            clone_data = elections_df[elections_df['title'] == clone_choice].iloc[0]
+            
+            col_c1, col_c2 = st.columns(2)
+            with col_c1: clone_dl_date = st.date_input("New Deadline Date", datetime.date.today() + datetime.timedelta(days=7), key="c_date")
+            with col_c2: clone_dl_time = st.time_input("New Deadline Time", datetime.time(23, 59), key="c_time")
+                
+            if st.button("Duplicate Election"):
+                new_dt_str = datetime.datetime.combine(clone_dl_date, clone_dl_time).strftime("%Y-%m-%d %H:%M:%S")
+                new_title = f"{clone_data['title']} (Copy)"
+                
+                c.execute('''INSERT INTO elections (title, description, election_type, deadline, questions_json, is_blindfolded, quorum)
+                                 VALUES (%s, %s, %s, %s, %s, %s, %s)''', 
+                              (new_title, clone_data['description'], clone_data['election_type'], new_dt_str, 
+                               clone_data['questions_json'], int(clone_data.get('is_blindfolded', 0)), int(clone_data.get('quorum', 0))))
+                conn.commit()
+                st.success(f"Election duplicated as '{new_title}'!")
+                time.sleep(1)
+                st.rerun()
 
     # 2. VOTER ACCESS (EMAILS / IDs)
     with sub_voters:
@@ -489,11 +534,16 @@ try:
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("#### Add Specific Emails")
-                custom_voters = st.text_area("Paste allowed emails/IDs (One per line):")
+                custom_voters = st.text_area("Paste allowed emails (One per line):")
                 if st.button("Authorize Batch Voters"):
                     voters =[v.strip() for v in custom_voters.split("\n") if v.strip()]
                     for v in voters:
-                        c.execute("INSERT INTO voter_status (election_id, voter_hash, is_allowed, has_voted) VALUES (%s, %s, 1, 0) ON CONFLICT (election_id, voter_hash) DO NOTHING", (int(v_id), hash_identifier(v)))
+                        plaintext_email = v if '@' in v else None
+                        c.execute('''INSERT INTO voter_status (election_id, voter_hash, is_allowed, has_voted, email_plaintext) 
+                                     VALUES (%s, %s, 1, 0, %s) 
+                                     ON CONFLICT (election_id, voter_hash) 
+                                     DO UPDATE SET email_plaintext = EXCLUDED.email_plaintext''', 
+                                  (int(v_id), hash_identifier(v), plaintext_email))
                     conn.commit()
                     st.success(f"Added {len(voters)} voters! The metric above will update.")
                     st.rerun()
@@ -504,7 +554,10 @@ try:
                 if st.button("Generate & Authorize IDs"):
                     new_ids =[f"VOTE-{secrets.token_hex(4).upper()}" for _ in range(num_ids)]
                     for nid in new_ids:
-                        c.execute("INSERT INTO voter_status (election_id, voter_hash, is_allowed, has_voted) VALUES (%s, %s, 1, 0) ON CONFLICT (election_id, voter_hash) DO NOTHING", (int(v_id), hash_identifier(nid)))
+                        c.execute('''INSERT INTO voter_status (election_id, voter_hash, is_allowed, has_voted) 
+                                     VALUES (%s, %s, 1, 0) 
+                                     ON CONFLICT (election_id, voter_hash) DO NOTHING''', 
+                                  (int(v_id), hash_identifier(nid)))
                     conn.commit()
                     st.success(f"Generated {num_ids} IDs.")
                     
@@ -515,61 +568,137 @@ try:
     with sub_turnout:
         if not elections_df.empty:
             t_choice = st.selectbox("Select Election Dashboard:", elections_df['title'], key="turnout_sel")
-            
             t_data = elections_df[elections_df['title'] == t_choice].iloc[0]
             current_election_id = int(t_data['id'])
             
-            # Share Links
+            dl_val = t_data['deadline']
+            deadline_dt = datetime.datetime.strptime(dl_val, "%Y-%m-%d %H:%M:%S") if isinstance(dl_val, str) else dl_val
+            is_active = datetime.datetime.now() < deadline_dt
+            is_blind = t_data.get('is_blindfolded') == 1
+
             st.markdown("### 🔗 Shareable Links")
-            st.code(get_base_url().format(current_election_id, "vote"), language="html")
+            vote_link = get_base_url().format(current_election_id, "vote")
+            results_link = get_base_url().format(current_election_id, "results")
+            st.code(vote_link, language="html")
             st.caption("Direct Link: VOTE")
-            st.code(get_base_url().format(current_election_id, "results"), language="html")
+            st.code(results_link, language="html")
             st.caption("Direct Link: PUBLIC RESULTS / RECEIPTS")
             
             st.divider()
             
-            # Turnout Stats
-            st.markdown("### 📊 Turnout Statistics")
-            
-            c.execute("SELECT COUNT(*) FROM voter_status WHERE election_id=%s AND is_allowed=1", (current_election_id,))
-            total_allowed = c.fetchone()[0]
-            
-            c.execute("SELECT COUNT(*) FROM anonymous_votes WHERE election_id=%s", (current_election_id,))
-            total_voted = c.fetchone()[0]
-            
-            if t_data['election_type'] == 'Closed (Restricted Access)' and total_allowed > 0:
-                turnout_pct = (total_voted / total_allowed) * 100
-                st.metric("Voter Turnout", f"{turnout_pct:.1f}%", f"{total_voted} out of {total_allowed} authorized voters.")
-                st.progress(min(total_voted / total_allowed, 1.0))
+            if is_blind and is_active:
+                st.warning("🔒 **STRICT NEUTRALITY ENABLED**: Turnout metrics, standing results, and raw data exports are completely hidden from all admins until the deadline passes.")
             else:
-                st.metric("Total Votes Cast", total_voted)
-
-            # Raw Data Export
-            st.markdown("### 📥 Export Anonymized Ballots")
-            c.execute("SELECT receipt_id, ballot_json FROM anonymous_votes WHERE election_id=%s", (current_election_id,))
-            raw_data = c.fetchall()
-            if raw_data:
-                csv_data = pd.DataFrame(raw_data, columns=["Receipt_ID", "Ballot_JSON_Format"]).to_csv(index=False).encode('utf-8')
-                st.download_button("Download Raw Ballot CSV", csv_data, f"ballots_{current_election_id}.csv", "text/csv")
-            else:
-                st.info("No votes cast yet.")
+                st.markdown("### 📊 Turnout Statistics")
+                c.execute("SELECT COUNT(*) FROM voter_status WHERE election_id=%s AND is_allowed=1", (current_election_id,))
+                total_allowed = c.fetchone()[0]
                 
+                c.execute("SELECT COUNT(*) FROM anonymous_votes WHERE election_id=%s", (current_election_id,))
+                total_voted = c.fetchone()[0]
+                
+                if t_data['election_type'] == 'Closed (Restricted Access)' and total_allowed > 0:
+                    turnout_pct = (total_voted / total_allowed) * 100
+                    st.metric("Voter Turnout", f"{turnout_pct:.1f}%", f"{total_voted} out of {total_allowed} authorized voters.")
+                    st.progress(min(total_voted / total_allowed, 1.0))
+                else:
+                    st.metric("Total Votes Cast", total_voted)
+
+                st.markdown("### 📥 Export Anonymized Ballots")
+                c.execute("SELECT receipt_id, ballot_json FROM anonymous_votes WHERE election_id=%s", (current_election_id,))
+                raw_data = c.fetchall()
+                if raw_data:
+                    csv_data = pd.DataFrame(raw_data, columns=["Receipt_ID", "Ballot_JSON_Format"]).to_csv(index=False).encode('utf-8')
+                    st.download_button("Download Raw Ballot CSV", csv_data, f"ballots_{current_election_id}.csv", "text/csv")
+                else:
+                    st.info("No votes cast yet.")
+            
             st.divider()
             
-            # Danger Zone / Manage
-            st.markdown("### ⚙️ Manage Election")
-            st.write(f"**Current Deadline:** {t_data['deadline']}")
-            
-            new_dl_date = st.date_input("Extend/Change Date", key="edit_d")
-            new_dl_time = st.time_input("Extend/Change Time", key="edit_t")
-            
-            if st.button("Update Deadline"):
-                new_dt_str = datetime.datetime.combine(new_dl_date, new_dl_time).strftime("%Y-%m-%d %H:%M:%S")
-                c.execute("UPDATE elections SET deadline=%s WHERE id=%s", (new_dt_str, current_election_id))
-                conn.commit()
-                st.success("Deadline updated!")
-                st.rerun()
+            if is_active:
+                # --- NUDGE EMAILS ---
+                st.markdown("### 📩 Send Nudge Emails")
+                st.write("Automatically send a polite reminder email to all authorized voters who have not yet voted.")
                 
+                c.execute("SELECT email_plaintext FROM voter_status WHERE election_id=%s AND has_voted=0 AND email_plaintext IS NOT NULL AND email_plaintext LIKE '%%@%%'", (current_election_id,))
+                unvoted_emails = [r[0] for r in c.fetchall()]
+                
+                if len(unvoted_emails) == 0:
+                    st.info("There are no remaining valid email addresses to nudge (either everyone voted, or you are using random IDs).")
+                else:
+                    st.write(f"**{len(unvoted_emails)}** voters are eligible for a nudge.")
+                    if st.button("Send Reminder to All Remaining Voters"):
+                        with st.spinner("Sending emails..."):
+                            sent_count = 0
+                            for email in unvoted_emails:
+                                body = f"Hello,\n\nThis is a quick reminder that you are authorized to vote in '{t_data['title']}'.\n\nYou have not cast your ballot yet. The election closes on {t_data['deadline']}.\n\nCast your anonymous vote here:\n{vote_link}\n\nThank you!"
+                                success, _ = send_smtp_email(email, f"Reminder: Vote in {t_data['title']}", body)
+                                if success: sent_count += 1
+                            st.success(f"Successfully sent {sent_count} / {len(unvoted_emails)} nudge emails.")
+                
+                st.divider()
+                st.markdown("### ⚙️ Manage Election")
+                st.write(f"**Current Deadline:** {t_data['deadline']}")
+                new_dl_date = st.date_input("Extend/Change Date", key="edit_d")
+                new_dl_time = st.time_input("Extend/Change Time", key="edit_t")
+                
+                col_end1, col_end2 = st.columns(2)
+                with col_end1:
+                    if st.button("Update Deadline"):
+                        new_dt_str = datetime.datetime.combine(new_dl_date, new_dl_time).strftime("%Y-%m-%d %H:%M:%S")
+                        c.execute("UPDATE elections SET deadline=%s WHERE id=%s", (new_dt_str, current_election_id))
+                        conn.commit()
+                        st.success("Deadline updated!")
+                        st.rerun()
+                
+                # --- END ELECTION NOW ---
+                with col_end2:
+                    if st.button("🚨 End Election Now"):
+                        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        c.execute("UPDATE elections SET deadline=%s WHERE id=%s", (now_str, current_election_id))
+                        conn.commit()
+                        
+                        c.execute("SELECT email_plaintext FROM voter_status WHERE election_id=%s AND email_plaintext IS NOT NULL AND email_plaintext LIKE '%%@%%'", (current_election_id,))
+                        emails = [r[0] for r in c.fetchall()]
+                        
+                        with st.spinner("Ending election and notifying voters..."):
+                            sent = 0
+                            for em in emails:
+                                body = f"The election '{t_data['title']}' has now officially ended.\n\nYou can view the results here:\n{results_link}"
+                                if send_smtp_email(em, f"Election Concluded: {t_data['title']}", body)[0]: sent += 1
+                        st.success(f"Election ended! Notified {sent} voters.")
+                        time.sleep(2)
+                        st.rerun()
+            
+            else:
+                # --- BROADCAST RESULTS (Only visible when election has ended) ---
+                st.markdown("### 📢 Broadcast Results")
+                st.write("The election has concluded. Click below to calculate the final results and email them to all authorized voters.")
+                
+                if st.button("Email Results to Authorized Voters"):
+                    c.execute("SELECT ballot_json FROM anonymous_votes WHERE election_id=%s", (current_election_id,))
+                    raw_ballots =[json.loads(v[0]) for v in c.fetchall()]
+                    
+                    results_summary = ""
+                    questions_data = json.loads(t_data['questions_json'])
+                    for q in questions_data:
+                        q_ballots = [b.get(q['id']) for b in raw_ballots if b.get(q['id']) and len(b.get(q['id'])) > 0]
+                        cands = [cand['name'] for cand in q['candidates']]
+                        _, _, elected = run_multi_winner_stv(q_ballots, cands, q['seats'])
+                        results_summary += f"\n- {q['title']}: {', '.join(elected) if elected else 'No winners'}"
+                    
+                    c.execute("SELECT email_plaintext FROM voter_status WHERE election_id=%s AND email_plaintext IS NOT NULL AND email_plaintext LIKE '%%@%%'", (current_election_id,))
+                    emails = [r[0] for r in c.fetchall()]
+                    
+                    with st.spinner("Calculating and sending results..."):
+                        sent = 0
+                        for em in emails:
+                            body = f"The official results for '{t_data['title']}' are in!\n\nSummary of Winners:{results_summary}\n\nView the full detailed breakdown and STV transfer logs here:\n{results_link}"
+                            if send_smtp_email(em, f"Official Results: {t_data['title']}", body)[0]: sent += 1
+                    st.success(f"Results broadcasted to {sent} voters!")
+                
+                st.divider()
+
+            # --- DANGER ZONE ---
             st.error("Danger Zone")
             if st.button("DELETE ELECTION PERMANENTLY", key="del_btn"):
                 c.execute("DELETE FROM elections WHERE id=%s", (current_election_id,))
@@ -577,6 +706,7 @@ try:
                 c.execute("DELETE FROM anonymous_votes WHERE election_id=%s", (current_election_id,))
                 conn.commit()
                 st.warning(f"Election '{t_choice}' deleted.")
+                time.sleep(1)
                 st.rerun()
 
     # 4. SMTP SETUP
