@@ -465,7 +465,12 @@ with sub_voters:
             if st.button("Authorize Batch Voters"):
                 voters =[v.strip() for v in custom_voters.split("\n") if v.strip()]
                 for v in voters:
-                    c.execute("ON CONFLICT DO NOTHING INTO voter_status (election_id, voter_hash, is_allowed, has_voted) VALUES (%s, %s, 1, 0)", (int(v_id), hash_identifier(v)))
+c.execute("""
+    INSERT INTO voter_status (election_id, voter_hash, is_allowed, has_voted) 
+    VALUES (%s, %s, 1, 0) 
+    ON CONFLICT (election_id, voter_hash) DO NOTHING
+""", (int(v_id), hash_identifier(v)))
+
                 conn.commit()
                 st.success(f"Added {len(voters)} voters! The metric above will update.")
                 st.rerun()
@@ -476,7 +481,12 @@ with sub_voters:
             if st.button("Generate & Authorize IDs"):
                 new_ids =[f"VOTE-{secrets.token_hex(4).upper()}" for _ in range(num_ids)]
                 for nid in new_ids:
-                    c.execute("ON CONFLICT DO NOTHING INTO voter_status (election_id, voter_hash, is_allowed, has_voted) VALUES (%s, %s, 1, 0)", (int(v_id), hash_identifier(nid)))
+
+c.execute("""
+    INSERT INTO voter_status (election_id, voter_hash, is_allowed, has_voted) 
+    VALUES (%s, %s, 1, 0) 
+    ON CONFLICT (election_id, voter_hash) DO NOTHING
+""", (int(v_id), hash_identifier(nid)))
                 conn.commit()
                 st.success(f"Generated {num_ids} IDs.")
                 
