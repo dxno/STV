@@ -1,3 +1,4 @@
+import sqlalchemy
 import streamlit as st
 import sqlite3
 import datetime
@@ -15,7 +16,9 @@ from email.mime.text import MIMEText
 DB_FILE = "pubsoc_stv_v4.db"
 
 def get_connection():
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
+    # This pulls the URL you just saved in the Streamlit Secrets tab
+    engine = sqlalchemy.create_engine(st.secrets["DB_URL"])
+    return engine.raw_connection()
 
 def init_db():
     conn = get_connection()
