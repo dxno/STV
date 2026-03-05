@@ -10,6 +10,15 @@ import smtplib
 from email.mime.text import MIMEText
 
 # ==========================================
+# 0. HELPER FUNCTIONS
+# ==========================================
+def get_ordinal(n):
+    """Converts an integer into its ordinal representation (1 -> 1st, 2 -> 2nd)."""
+    if 11 <= (n % 100) <= 13:
+        return f"{n}th"
+    return f"{n}" + {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
+
+# ==========================================
 # 1. DATABASE SETUP (PostgreSQL Optimized)
 # ==========================================
 
@@ -25,7 +34,6 @@ def init_db():
     conn = get_connection()
     try:
         c = conn.cursor()
-        # Use SERIAL for auto-incrementing IDs in PostgreSQL
         c.execute('''CREATE TABLE IF NOT EXISTS elections (
                         id SERIAL PRIMARY KEY,
                         title TEXT,
@@ -224,12 +232,10 @@ if action_param in ["vote", "results"] and election_id_param:
             st.error("Election not found or link is invalid.")
             st.stop()
             
-        cols = [desc[0] for desc in c.description]
+        cols =[desc[0] for desc in c.description]
         election = dict(zip(cols, elec_row))
         questions_data = json.loads(election['questions_json'])
         
-        # PostgreSQL automatically converts TIMESTAMP to datetime objects. 
-        # Safely handle both string (SQLite legacy) and datetime (PostgreSQL)
         deadline_val = election['deadline']
         if isinstance(deadline_val, str):
             deadline_dt = datetime.datetime.strptime(deadline_val, "%Y-%m-%d %H:%M:%S")
@@ -260,7 +266,7 @@ if action_param in ["vote", "results"] and election_id_param:
                         st.warning("You have already voted in this election.")
                     else:
                         can_proceed = True
-                else: # Open Election logic
+                else: 
                     if record is not None and record[1] == 1:
                         st.warning("You have already voted in this election.")
                     else:
@@ -321,7 +327,8 @@ if action_param in ["vote", "results"] and election_id_param:
                             if selection:
                                 st.markdown("**Your Custom Rankings:**")
                                 for i, choice in enumerate(selection):
-                                    st.markdown(f"**{i+1}️⃣st/nd/rd/th Choice:** {choice}")
+                                    # FIX: Now cleanly displays "1st Choice:", "2nd Choice:" etc.
+                                    st.markdown(f"**{get_ordinal(i+1)} Choice:** {choice}")
                                 ballot_dict[q['id']] = selection
                         
                         st.divider()
@@ -372,13 +379,17 @@ if action_param in ["vote", "results"] and election_id_param:
 # --- MAIN ADMIN APP ---
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 
+# FIX: Fetching credentials from st.secrets, with a safe fallback
+admin_user = st.secrets.get("ADMIN_USER", "PubSoc")
+admin_pass = st.secrets.get("ADMIN_PASS", "randomise")
+
 with st.sidebar:
     if not st.session_state['logged_in']:
         st.markdown("### 🔐 Admin Login")
         user = st.text_input("Username")
         pw = st.text_input("Password", type="password")
         if st.button("Login"):
-            if user == "PubSoc" and pw == "randomise":
+            if user == admin_user and pw == admin_pass:
                 st.session_state['logged_in'] = True
                 st.rerun()
             else: st.error("Invalid credentials")
@@ -398,8 +409,6 @@ conn = get_connection()
 try:
     c = conn.cursor() 
 
-    # FETCH FULL ELECTIONS DATA FRAME
-    # (Passed the cached engine directly to pandas to avoid DBAPI deprecation warnings)
     elections_df = pd.read_sql_query("SELECT * FROM elections", get_engine())
 
     sub_create, sub_voters, sub_turnout, sub_smtp = st.tabs(["Create Election Event", "Voter Access (Emails/IDs)", "Turnout & Data Export", "SMTP Setup"])
@@ -484,7 +493,6 @@ try:
                 if st.button("Authorize Batch Voters"):
                     voters =[v.strip() for v in custom_voters.split("\n") if v.strip()]
                     for v in voters:
-                        # ON CONFLICT replaces SQLite's INSERT OR IGNORE
                         c.execute("INSERT INTO voter_status (election_id, voter_hash, is_allowed, has_voted) VALUES (%s, %s, 1, 0) ON CONFLICT (election_id, voter_hash) DO NOTHING", (int(v_id), hash_identifier(v)))
                     conn.commit()
                     st.success(f"Added {len(voters)} voters! The metric above will update.")
@@ -595,5 +603,4 @@ try:
             st.success("SMTP Configuration saved!")
 
 finally:
-    # Guarantees the database connection is closed safely when the script finishes or hits st.stop() / st.rerun()
     conn.close()
