@@ -23,8 +23,9 @@ def get_connection():
 def init_db():
     conn = get_connection()
     c = conn.cursor()
+    # Use SERIAL for auto-incrementing IDs in PostgreSQL
     c.execute('''CREATE TABLE IF NOT EXISTS elections (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     title TEXT,
                     description TEXT,
                     election_type TEXT, 
@@ -40,7 +41,7 @@ def init_db():
                     PRIMARY KEY (election_id, voter_hash)
                 )''')
     c.execute('''CREATE TABLE IF NOT EXISTS anonymous_votes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     election_id INTEGER,
                     receipt_id TEXT,
                     ballot_json TEXT
