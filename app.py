@@ -204,13 +204,13 @@ query_params = st.query_params
 action_param = query_params.get("action", None)
 election_id_param = query_params.get("election_id", None)
 
-def get_base_url(): return "?election_id={}&action={}"
+def get_base_url(): return "%selection_id={}&action={}"
 
 # --- DIRECT SHAREABLE LINKS ---
 if action_param in ["vote", "results"] and election_id_param:
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM elections WHERE id=?", (election_id_param,))
+    c.execute("SELECT * FROM elections WHERE id=%s", (election_id_param,))
     elec_row = c.fetchone()
     
     if not elec_row:
@@ -234,7 +234,7 @@ if action_param in ["vote", "results"] and election_id_param:
         voter_id = st.text_input("Enter your authorized Email or Voter ID:")
         if voter_id:
             voter_hash = hash_identifier(voter_id)
-            c.execute("SELECT is_allowed, has_voted, otp FROM voter_status WHERE election_id=? AND voter_hash=?", (election['id'], voter_hash))
+            c.execute("SELECT is_allowed, has_voted, otp FROM voter_status WHERE election_id=%s AND voter_hash=%s", (election['id'], voter_hash))
             record = c.fetchone()
             
             can_proceed = False
@@ -257,11 +257,11 @@ if action_param in ["vote", "results"] and election_id_param:
                 if not st.session_state['otp_verified']:
                     if st.button("Send Security Code (OTP)"):
                         new_otp = generate_otp()
-                        c.execute("SELECT 1 FROM voter_status WHERE election_id=? AND voter_hash=?", (election['id'], voter_hash))
+                        c.execute("SELECT 1 FROM voter_status WHERE election_id=%s AND voter_hash=%s", (election['id'], voter_hash))
                         if c.fetchone():
-                            c.execute("UPDATE voter_status SET otp=? WHERE election_id=? AND voter_hash=?", (new_otp, election['id'], voter_hash))
+                            c.execute("UPDATE voter_status SET otp=%s WHERE election_id=%s AND voter_hash=%s", (new_otp, election['id'], voter_hash))
                         else:
-                            c.execute("INSERT INTO voter_status (election_id, voter_hash, is_allowed, has_voted, otp) VALUES (?, ?, 1, 0, ?)", (election['id'], voter_hash, new_otp))
+                            c.execute("INSERT INTO voter_status (election_id, voter_hash, is_allowed, has_voted, otp) VALUES (%s, %s, 1, 0, %s)", (election['id'], voter_hash, new_otp))
                         conn.commit()
                         
                         if "@" in voter_id:
@@ -276,7 +276,7 @@ if action_param in ["vote", "results"] and election_id_param:
                     
                     entered_otp = st.text_input("Enter 6-digit OTP Code:")
                     if st.button("Verify OTP"):
-                        c.execute("SELECT otp FROM voter_status WHERE election_id=? AND voter_hash=?", (election['id'], voter_hash))
+                        c.execute("SELECT otp FROM voter_status WHERE election_id=%s AND voter_hash=%s", (election['id'], voter_hash))
                         db_otp = c.fetchone()
                         if db_otp and db_otp[0] == entered_otp:
                             st.session_state['otp_verified'] = True
@@ -316,8 +316,8 @@ if action_param in ["vote", "results"] and election_id_param:
                             st.error("You must make at least one selection across the entire ballot to submit.")
                         else:
                             receipt = generate_receipt()
-                            c.execute("UPDATE voter_status SET has_voted=1, otp=NULL WHERE election_id=? AND voter_hash=?", (election['id'], voter_hash))
-                            c.execute("INSERT INTO anonymous_votes (election_id, receipt_id, ballot_json) VALUES (?, ?, ?)", (election['id'], receipt, json.dumps(ballot_dict)))
+                            c.execute("UPDATE voter_status SET has_voted=1, otp=NULL WHERE election_id=%s AND voter_hash=%s", (election['id'], voter_hash))
+                            c.execute("INSERT INTO anonymous_votes (election_id, receipt_id, ballot_json) VALUES (%s, %s, %s)", (election['id'], receipt, json.dumps(ballot_dict)))
                             conn.commit()
                             st.success("✅ Vote cast successfully!")
                             st.info(f"🧾 **YOUR RECEIPT:** `{receipt}`\n\nSave this to verify your vote on the results page.")
@@ -326,7 +326,7 @@ if action_param in ["vote", "results"] and election_id_param:
 
     elif action_param == "results":
         st.title(f"📊 Results: {election['title']}")
-        c.execute("SELECT ballot_json FROM anonymous_votes WHERE election_id=?", (election['id'],))
+        c.execute("SELECT ballot_json FROM anonymous_votes WHERE election_id=%s", (election['id'],))
         raw_ballots = [json.loads(v[0]) for v in c.fetchall()]
         
         st.metric("Total Overall Ballots Cast", len(raw_ballots))
@@ -342,7 +342,7 @@ if action_param in ["vote", "results"] and election_id_param:
         st.markdown("### 🔍 Verify Your Receipt")
         receipt_query = st.text_input("Enter your Voter Receipt ID to verify:")
         if st.button("Verify"):
-            c.execute("SELECT ballot_json FROM anonymous_votes WHERE election_id=? AND receipt_id=?", (election['id'], receipt_query.strip().upper()))
+            c.execute("SELECT ballot_json FROM anonymous_votes WHERE election_id=%s AND receipt_id=%s", (election['id'], receipt_query.strip().upper()))
             res = c.fetchone()
             if res:
                 st.success("✅ Your vote is logged securely in the database!")
@@ -405,10 +405,10 @@ with sub_create:
         questions_list =[]
         for i in range(int(num_questions)):
             st.markdown(f"#### Position/Question {i+1}")
-            q_title = st.text_input("Title (e.g., President OR Referendum: Change Name?)", key=f"q_title_{i}")
+            q_title = st.text_input("Title (e.g., President OR Referendum: Change Name%s)", key=f"q_title_{i}")
             q_seats = st.number_input("Seats / Winners", min_value=1, value=1, key=f"q_seats_{i}")
             q_cands = st.text_area("Candidates/Options (Format: Name | Bio)", placeholder="Alice | Treasurer\nBob | \nYes | \nNo |", key=f"q_cands_{i}")
-            q_ron = st.checkbox("Append 'Re-Open Nominations (RON)' to this question?", value=True, key=f"q_ron_{i}")
+            q_ron = st.checkbox("Append 'Re-Open Nominations (RON)' to this question%s", value=True, key=f"q_ron_{i}")
             
             # Save references to process on submit
             questions_list.append({"id": f"q_{i}", "title_key": f"q_title_{i}", "seats_key": f"q_seats_{i}", "cands_key": f"q_cands_{i}", "ron_key": f"q_ron_{i}"})
@@ -441,7 +441,7 @@ with sub_create:
                     })
                 
                 c.execute('''INSERT INTO elections (title, description, election_type, deadline, questions_json)
-                             VALUES (?, ?, ?, ?, ?)''', 
+                             VALUES (%s, %s, %s, %s, %s)''', 
                           (new_title, new_desc, elec_type, deadline_dt.strftime("%Y-%m-%d %H:%M:%S"), json.dumps(final_questions)))
                 conn.commit()
                 st.success("Election Event created! Go to 'Voter Access' to authorize voters.")
@@ -454,7 +454,7 @@ with sub_voters:
         v_choice = st.selectbox("Select Election to Manage Access:", elections_df['title'])
         v_id = elections_df[elections_df['title'] == v_choice].iloc[0]['id']
         
-        c.execute("SELECT COUNT(*) FROM voter_status WHERE election_id=? AND is_allowed=1", (int(v_id),))
+        c.execute("SELECT COUNT(*) FROM voter_status WHERE election_id=%s AND is_allowed=1", (int(v_id),))
         auth_count = c.fetchone()[0]
         st.metric("Total Authorized Voters", auth_count)
         
@@ -465,18 +465,18 @@ with sub_voters:
             if st.button("Authorize Batch Voters"):
                 voters =[v.strip() for v in custom_voters.split("\n") if v.strip()]
                 for v in voters:
-                    c.execute("ON CONFLICT DO NOTHING INTO voter_status (election_id, voter_hash, is_allowed, has_voted) VALUES (?, ?, 1, 0)", (int(v_id), hash_identifier(v)))
+                    c.execute("ON CONFLICT DO NOTHING INTO voter_status (election_id, voter_hash, is_allowed, has_voted) VALUES (%s, %s, 1, 0)", (int(v_id), hash_identifier(v)))
                 conn.commit()
                 st.success(f"Added {len(voters)} voters! The metric above will update.")
                 st.rerun()
                 
         with col2:
             st.markdown("#### Generate Random IDs")
-            num_ids = st.number_input("How many IDs to generate?", min_value=1, value=50)
+            num_ids = st.number_input("How many IDs to generate%s", min_value=1, value=50)
             if st.button("Generate & Authorize IDs"):
                 new_ids =[f"VOTE-{secrets.token_hex(4).upper()}" for _ in range(num_ids)]
                 for nid in new_ids:
-                    c.execute("ON CONFLICT DO NOTHING INTO voter_status (election_id, voter_hash, is_allowed, has_voted) VALUES (?, ?, 1, 0)", (int(v_id), hash_identifier(nid)))
+                    c.execute("ON CONFLICT DO NOTHING INTO voter_status (election_id, voter_hash, is_allowed, has_voted) VALUES (%s, %s, 1, 0)", (int(v_id), hash_identifier(nid)))
                 conn.commit()
                 st.success(f"Generated {num_ids} IDs.")
                 
@@ -505,11 +505,11 @@ with sub_turnout:
         st.markdown("### 📊 Turnout Statistics")
         
         # FIX 2: Use the casted current_election_id for all queries
-        c.execute("SELECT COUNT(*) FROM voter_status WHERE election_id=? AND is_allowed=1", (current_election_id,))
+        c.execute("SELECT COUNT(*) FROM voter_status WHERE election_id=%s AND is_allowed=1", (current_election_id,))
         total_allowed = c.fetchone()[0]
         
         # Turnout is based on how many unique anonymous ballots exist for this ID
-        c.execute("SELECT COUNT(*) FROM anonymous_votes WHERE election_id=?", (current_election_id,))
+        c.execute("SELECT COUNT(*) FROM anonymous_votes WHERE election_id=%s", (current_election_id,))
         total_voted = c.fetchone()[0]
         
         if t_data['election_type'] == 'Closed (Restricted Access)' and total_allowed > 0:
@@ -521,7 +521,7 @@ with sub_turnout:
 
         # Raw Data Export
         st.markdown("### 📥 Export Anonymized Ballots")
-        c.execute("SELECT receipt_id, ballot_json FROM anonymous_votes WHERE election_id=?", (current_election_id,))
+        c.execute("SELECT receipt_id, ballot_json FROM anonymous_votes WHERE election_id=%s", (current_election_id,))
         raw_data = c.fetchall()
         if raw_data:
             csv_data = pd.DataFrame(raw_data, columns=["Receipt_ID", "Ballot_JSON_Format"]).to_csv(index=False).encode('utf-8')
@@ -541,7 +541,7 @@ with sub_turnout:
         if st.button("Update Deadline"):
             new_dt_str = datetime.datetime.combine(new_dl_date, new_dl_time).strftime("%Y-%m-%d %H:%M:%S")
             # FIX 3: Ensure the ID is cast to int in the UPDATE query
-            c.execute("UPDATE elections SET deadline=? WHERE id=?", (new_dt_str, current_election_id))
+            c.execute("UPDATE elections SET deadline=%s WHERE id=%s", (new_dt_str, current_election_id))
             conn.commit()
             st.success("Deadline updated!")
             st.rerun()
@@ -550,9 +550,9 @@ with sub_turnout:
         # Use a unique key for the delete button to prevent accidental triggers
         if st.button("DELETE ELECTION PERMANENTLY", key="del_btn"):
             # FIX 4: Explicitly delete from all tables using the casted ID
-            c.execute("DELETE FROM elections WHERE id=?", (current_election_id,))
-            c.execute("DELETE FROM voter_status WHERE election_id=?", (current_election_id,))
-            c.execute("DELETE FROM anonymous_votes WHERE election_id=?", (current_election_id,))
+            c.execute("DELETE FROM elections WHERE id=%s", (current_election_id,))
+            c.execute("DELETE FROM voter_status WHERE election_id=%s", (current_election_id,))
+            c.execute("DELETE FROM anonymous_votes WHERE election_id=%s", (current_election_id,))
             conn.commit()
             st.warning(f"Election '{t_choice}' deleted.")
             st.rerun()
@@ -572,10 +572,10 @@ with sub_smtp:
     if st.button("Save SMTP Config"):
         kv = {"smtp_enabled": str(enable_smtp), "smtp_host": smtp_host, "smtp_port": str(smtp_port), "smtp_user": smtp_user, "smtp_pass": smtp_pass}
         for k, v in kv.items():
-            c.execute("SELECT 1 FROM app_config WHERE key=?", (k,))
+            c.execute("SELECT 1 FROM app_config WHERE key=%s", (k,))
             if c.fetchone():
-                c.execute("UPDATE app_config SET value=? WHERE key=?", (v, k))
+                c.execute("UPDATE app_config SET value=%s WHERE key=%s", (v, k))
             else:
-                c.execute("INSERT INTO app_config (key, value) VALUES (?, ?)", (k, v))
+                c.execute("INSERT INTO app_config (key, value) VALUES (%s, %s)", (k, v))
         conn.commit()
         st.success("SMTP Configuration saved!")
