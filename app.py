@@ -227,7 +227,7 @@ query_params = st.query_params
 action_param = query_params.get("action", None)
 election_id_param = query_params.get("election_id", None)
 
-host_url = st.secrets.get("HOST_URL", "https://your-app-url.streamlit.app")
+host_url = st.secrets.get("HOST_URL", "https://pubsoc-vote.streamlit.app")
 def get_base_url(): 
     return host_url + "?election_id={}&action={}"
 
