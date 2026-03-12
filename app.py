@@ -454,9 +454,10 @@ try:
 
     elections_df = pd.read_sql_query("SELECT * FROM elections ORDER BY id DESC", get_engine())
 
-    sub_create, sub_clone, sub_voters, sub_turnout, sub_smtp = st.tabs([
+    # Removed sub_smtp from tabs
+    sub_create, sub_clone, sub_voters, sub_turnout = st.tabs([
         "Create Election Event", "Clone Past Election", "Voter Access (Emails/IDs)", 
-        "Turnout & Data Export", "SMTP Setup"
+        "Turnout & Data Export"
     ])
 
     # 1. CREATE ELECTION
@@ -662,12 +663,22 @@ try:
             
             if is_active:
                 # --- STATELESS NUDGE EMAILS ---
-                st.markdown("### 📩 Send Nudge Emails")
+                st.markdown("### 📩 Send Custom Nudge Emails")
                 st.info("Because plaintext emails are completely erased from the database to protect voter anonymity, "
                         "you must paste your master email list here to send nudges. The system will securely hash them, "
                         "identify exactly who hasn't voted yet, and automatically email only them.")
+                
                 nudge_emails_input = st.text_area("Paste Master Email List (One per line):", key="nudge_emails")
                 
+                st.markdown("#### Email Content")
+                default_subject = f"Reminder: Vote in {t_data['title']}"
+                default_body = (f"Hello,\n\nThis is a quick reminder that you are authorized to vote in "
+                                f"'{t_data['title']}'.\n\nYou have not cast your ballot yet. The election "
+                                f"closes on {t_data['deadline']}.\n\nCast your anonymous vote here:\n{vote_link}\n\nThank you!")
+                
+                custom_subject = st.text_input("Subject Line:", value=default_subject)
+                custom_body = st.text_area("Email Message:", value=default_body, height=200)
+
                 if st.button("Send Reminder to Remaining Voters"):
                     emails =[e.strip() for e in nudge_emails_input.split('\n') if '@' in e]
                     if not emails:
@@ -682,10 +693,8 @@ try:
                                           (current_election_id, em_hash))
                                 record = c.fetchone()
                                 if record and record[0] == 0:
-                                    body = (f"Hello,\n\nThis is a quick reminder that you are authorized to vote in "
-                                            f"'{t_data['title']}'.\n\nYou have not cast your ballot yet. The election "
-                                            f"closes on {t_data['deadline']}.\n\nCast your anonymous vote here:\n{vote_link}\n\nThank you!")
-                                    success, _ = send_smtp_email(em, f"Reminder: Vote in {t_data['title']}", body)
+                                    # Passing the fully customized subject and body from the UI inputs
+                                    success, _ = send_smtp_email(em, custom_subject, custom_body)
                                     if success: sent_count += 1
                             st.success(f"Successfully sent {sent_count} nudge emails.")
                 
@@ -762,30 +771,6 @@ try:
                 st.warning(f"Election '{t_choice}' deleted.")
                 time.sleep(1)
                 st.rerun()
-
-    # 4. SMTP SETUP
-    with sub_smtp:
-        st.markdown("### 📧 Real Email Configuration")
-        c.execute("SELECT key, value FROM app_config")
-        config = dict(c.fetchall())
-        
-        enable_smtp = st.checkbox("Enable Real Emails", value=(config.get("smtp_enabled") == "True"))
-        smtp_host = st.text_input("SMTP Host", value=config.get("smtp_host", "smtp.gmail.com"))
-        smtp_port = st.text_input("SMTP Port", value=config.get("smtp_port", "587"))
-        smtp_user = st.text_input("Sender Email Address", value=config.get("smtp_user", ""))
-        smtp_pass = st.text_input("Email App Password", type="password", value=config.get("smtp_pass", ""))
-        
-        if st.button("Save SMTP Config"):
-            kv = {"smtp_enabled": str(enable_smtp), "smtp_host": smtp_host, "smtp_port": str(smtp_port), 
-                  "smtp_user": smtp_user, "smtp_pass": smtp_pass}
-            for k, v in kv.items():
-                c.execute("SELECT 1 FROM app_config WHERE key=%s", (k,))
-                if c.fetchone():
-                    c.execute("UPDATE app_config SET value=%s WHERE key=%s", (v, k))
-                else:
-                    c.execute("INSERT INTO app_config (key, value) VALUES (%s, %s)", (k, v))
-            conn.commit()
-            st.success("SMTP Configuration saved!")
 
 finally:
     conn.close()
